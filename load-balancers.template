@@ -1,0 +1,161 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+
+  "Description" : "Example load balancer template that shows a front end server that is accessible by the public and an api-server that is only available by the webapp frontend",
+
+  "Parameters" : {
+    "VpcId" : {
+      "Type" : "String",
+      "Description" : "VpcId of the vpc we are launching these load balancers in.  This comes from the output of vpc.template"
+    },
+
+    "PublicSubnets" : {
+      "Description" : "The public subnets that have access to the private subnets where instances live.  This comes from the output of vpc.template",
+      "Type" : "CommaDelimitedList"
+    },
+
+    "PrivateSubnets" : {
+      "Description" : "The public subnets that have access to the private subnets where instances live.  This comes from the output of vpc.template",
+      "Type" : "CommaDelimitedList"
+    }
+  },
+
+  "Mappings" : {
+  },
+
+  "Resources" : {
+
+    "WebappLoadBalancer" : {
+      "Type" : "AWS::ElasticLoadBalancing::LoadBalancer",
+      "Properties" : {
+        "LoadBalancerName" : {"Fn::Join" : ["-", ["webapp", { "Ref" : "VpcId" } ]]},
+        "SecurityGroups" : [ { "Ref" : "PublicLoadBalancerSecurityGroup" } ],
+        "Subnets" : { "Ref" : "PublicSubnets" },
+        "AppCookieStickinessPolicy" : 
+          [ {
+            "PolicyName" : "HTTPSCookieStickinessPolicy",
+            "CookieName" : "connect.sid"
+          } ],
+        "Listeners" : 
+          [ {
+            "LoadBalancerPort" : "80",
+            "InstancePort" : "80",
+            "Protocol" : "HTTP"
+          },
+          {
+            "LoadBalancerPort": "443",
+            "InstancePort" : "8080",
+            "Protocol" : "HTTPS",
+            "PolicyNames" : [ "HTTPSCookieStickinessPolicy" ],
+            "SSLCertificateId" : "TODO: ARN for your SSL certificate here or remote HTTPS support"
+          } ],
+        "HealthCheck" : {
+          "Target" : { "Fn::Join" : [ "", ["HTTP:8080", "/status"]]},
+          "HealthyThreshold" : "5",
+          "UnhealthyThreshold" : "3",
+          "Interval" : "30",
+          "Timeout" : "5"
+        }
+      }
+    },
+    "ApiServerLoadBalancer" : {
+      "Type" : "AWS::ElasticLoadBalancing::LoadBalancer",
+      "Properties" : {
+        "LoadBalancerName" : {"Fn::Join" : ["-", ["api-server", { "Ref" : "VpcId" } ]]},
+        "SecurityGroups" : [ { "Ref" : "ApiServerLoadBalancerSecurityGroup" } ],
+        "Subnets" : { "Ref" : "PrivateSubnets" },
+        "Scheme" : "internal",
+        "Listeners" : [ {
+          "LoadBalancerPort" : "80",
+          "InstancePort" : "80",
+          "Protocol" : "HTTP"
+        } ],
+        "HealthCheck" : {
+          "Target" : { "Fn::Join" : [ "", ["HTTP:", "80", "/status"]]},
+          "HealthyThreshold" : "5",
+          "UnhealthyThreshold" : "3",
+          "Interval" : "30",
+          "Timeout" : "5"
+        }
+      }
+    },
+    "ApiServerLoadBalancerSecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Enable HTTP access on port 80",
+        "VpcId" : { "Ref" : "VpcId" },
+        "SecurityGroupIngress" : [ { 
+          "IpProtocol" : "tcp",
+          "FromPort" : "80",
+          "ToPort" : "80",
+          "CidrIp" : "0.0.0.0/0"
+        } ],
+        "SecurityGroupEgress" : [ { 
+          "IpProtocol" : "tcp",
+          "FromPort" : "80",
+          "ToPort" : "80",
+          "CidrIp" : "0.0.0.0/0"
+        } ]
+      }
+    },
+
+    "PublicLoadBalancerSecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Enable HTTP/HTTPS access on port 80/443 to 80/8080",
+        "VpcId" : { "Ref" : "VpcId" },
+        "SecurityGroupIngress" : [ { 
+          "IpProtocol" : "tcp",
+          "FromPort" : "80",
+          "ToPort" : "80",
+          "CidrIp" : "0.0.0.0/0"
+        },
+        { 
+          "IpProtocol" : "tcp",
+          "FromPort" : "443",
+          "ToPort" : "443",
+          "CidrIp" : "0.0.0.0/0"
+        } ],
+        "SecurityGroupEgress" : [ { 
+          "IpProtocol" : "tcp",
+          "FromPort" : "80",
+          "ToPort" : "80",
+          "CidrIp" : "0.0.0.0/0"
+        },
+        { 
+          "IpProtocol" : "tcp",
+          "FromPort" : "8080",
+          "ToPort" : "8080",
+          "CidrIp" : "0.0.0.0/0"
+        } ]
+      }
+    }
+  },
+
+  "Outputs" : {
+    "WebappLoadBalancer" : {
+      "Description": "webapp load balancer",
+      "Value": { "Ref" : "WebappLoadBalancer" }
+    },
+    "WebappLoadBalancerDns" : {
+      "Description": "webapp load balancer DNS",
+      "Value": { "Fn::GetAtt" : ["WebappLoadBalancer", "DNSName"] }
+    },
+    "ApiServerLoadBalancer" : {
+      "Description" : "private api load balancer",
+      "Value" :  { "Ref" : "ApiServerLoadBalancer" }
+    },
+    "ApiServerLoadBalancerDns" : {
+      "Description": "api-server load balancer DNS",
+      "Value": { "Fn::GetAtt" : ["ApiServerLoadBalancer", "DNSName"] }
+    },
+    "ApiServerLoadBalancerSecurityGroup" : {
+      "Description" : "private api load balancer security group",
+      "Value" :  { "Ref" : "ApiServerLoadBalancerSecurityGroup" }
+    },
+    "PublicLoadBalancerSecurityGroup" : {
+      "Description" : "security group for webapp load balancers",
+      "Value" :  { "Ref" : "PublicLoadBalancerSecurityGroup" }
+    }
+  }
+}

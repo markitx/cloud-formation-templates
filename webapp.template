@@ -1,0 +1,471 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+
+  "Description" : "Example webapp server stack",
+
+  "Parameters" : {
+    "KeyName" : {
+      "Description" : "Name of an existing EC2 KeyPair to enable SSH access to the instances",
+      "Type" : "String",
+      "MinLength": "1",
+      "MaxLength": "64",
+      "AllowedPattern" : "[-_ a-zA-Z0-9]*",
+      "ConstraintDescription" : "can contain only alphanumeric characters, spaces, dashes and underscores."
+    },
+
+    "VpcId" : {
+      "Type" : "String",
+      "Description" : "VpcId of the vpc where we are launching the api server"
+    },
+
+    "InternalSshSecurityGroupId" : {
+      "Type" : "String",
+      "Description" : "Security group to allow internal ssh access"
+    },
+
+    "PrivateSubnets" : {
+      "Description" : "The private subnets where the webapp instances live",
+      "Type" : "CommaDelimitedList"
+    },
+
+    "WebappLoadBalancer" : {
+      "Description" : "The load balancer for the webapp",
+      "Type" : "String"
+    },
+
+    "ApiServerLoadBalancerDns" : {
+      "Description" : "The api-server's DNS name",
+      "Type" : "String"
+    },
+
+    "PublicLoadBalancerSecurityGroup" : {
+      "Description" : "The load balancer's security group for the webapp",
+      "Type" : "String"
+    },
+
+    "AZs" : {
+      "Description" : "The AZs where the webapp instances live",
+      "Type" : "CommaDelimitedList"
+    },
+
+    "DesiredCapacity": {
+      "Default" : "2",
+      "Type": "Number",
+      "MinValue": "2",
+      "MaxValue": "2",
+      "Description" : "Desired capacity for api-server autoscaling group"
+    },
+
+    "InstanceType" : {
+      "Description" : "Instance type",
+      "Type" : "String",
+      "Default" : "m1.small",
+      "AllowedValues" : [ "m1.small","m1.medium","m1.large", "c1.medium", "c3.large", "c1.xlarge"],
+      "ConstraintDescription" : "must be a valid and allowed EC2 instance type."
+    },
+
+    "WebappVersion" : {
+      "Type" : "String",
+      "Description" : "Version of webapp to deploy"
+    },
+
+    "Environment" : {
+      "Type" : "String",
+      "Description" : "Environment the webapp runs in"
+    }
+  },
+
+  "Mappings" : {
+    "AWSInstanceType2Arch" : {
+      "t1.micro"    : { "Arch" : "64" },
+      "m1.small"    : { "Arch" : "64" },
+      "m1.medium"   : { "Arch" : "64" },
+      "m1.large"    : { "Arch" : "64" },
+      "c1.medium"   : { "Arch" : "64" },
+      "c3.large"    : { "Arch" : "64" },
+      "c1.xlarge"   : { "Arch" : "64" }
+    },
+
+    "AWSRegionArch2AMI" : {
+      "us-east-1"      : { "64" : "ami-0568456c" },
+      "us-west-2"      : { "64" : "ami-927613a2" },
+      "us-west-1"      : { "64" : "ami-c08dbc85" }
+    }
+  },
+
+  "Resources" : {
+    "WebappGroup" : {
+      "Type" : "AWS::AutoScaling::AutoScalingGroup",
+      "Properties" : {
+        "AvailabilityZones" : { "Ref" : "AZs" },
+        "VPCZoneIdentifier" : { "Ref" : "PrivateSubnets" },
+        "LaunchConfigurationName" : { "Ref" : "LaunchConfig" },
+        "MinSize" : "2",
+        "MaxSize" : "2",
+        "DesiredCapacity" : { "Ref" : "DesiredCapacity" },
+        "LoadBalancerNames" : [ { "Ref" : "WebappLoadBalancer" } ]
+      }
+    },
+
+    "DeploymentInstanceProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Path": "/",
+        "Roles": [ "aws-deployment" ]
+      }
+    },
+
+    "LaunchConfig" : {
+      "Type" : "AWS::AutoScaling::LaunchConfiguration",
+      "Metadata" : {
+        "AWS::CloudFormation::Init" : {
+          "configSets" : {
+            "bootstrap" : ["machine","application"]
+          },
+          "machine" : {
+            "packages": {
+              "apt" : {
+                "build-essential" : [],
+                "wget"            : [],
+                "ssl-cert"        : [],
+                "git"             : [],
+                "rsyslog-gnutls"  : [],
+                "newrelic-sysmond": []
+              }
+            },
+            "commands" : {
+              "a-restart-rsyslog" : {
+                "command" : "service rsyslog restart"
+              },
+              "b-set-newrelic-license" : {
+                "command" : "nrsysmond-config --set license_key=TODO: Your NewRelic license key here"
+              },
+              "c-start-newrelic" : {
+                "command" : "/etc/init.d/newrelic-sysmond start"
+              },
+              "d-install-node" : {
+                "command" : "tar --strip-components 1 -xzf /tmp/node-v0.10.24-linux-x64.tar.gz",
+                "cwd" : "/usr/local"
+              }
+            },
+            "files" : { 
+              "/etc/rsyslog.d/30-logentries.conf" : {
+                "content" : { "Fn::Join" : ["", [
+                  "$ModLoad imfile   # Load the imfile input module\n",
+                  "$ModLoad imklog   # for reading kernel log messages\n",
+                  "$ModLoad imuxsock # for reading local syslog messages\n",
+
+                  "$FileOwner syslog\n",
+                  "$FileGroup adm\n",
+                  "$FileCreateMode 0640\n",
+                  "$DirCreateMode 0755\n",
+                  "$Umask 0022\n",
+                  "$PrivDropToUser syslog\n",
+                  "$PrivDropToGroup adm\n",
+
+                  "$InputFileName /var/log/webapp.log\n",
+                  "$InputFileTag webapp:\n",
+                  "$InputFileStateFile webapp\n",
+                  "$InputFileSeverity info\n",
+                  "$InputRunFileMonitor\n",
+
+                  "$InputFileName /var/log/nginx/access.log\n",
+                  "$InputFileTag nginx-access:\n",
+                  "$InputFileStateFile nginx-access\n",
+                  "$InputFileSeverity info\n",
+                  "$InputRunFileMonitor\n",
+
+                  "$InputFileName /var/log/nginx/error.log\n",
+                  "$InputFileTag nginx-error:\n",
+                  "$InputFileStateFile nginx-error\n",
+                  "$InputFileSeverity error\n",
+                  "$InputRunFileMonitor\n",
+
+                  "$InputFileName /var/log/nginx/your-site.log\n",
+                  "$InputFileTag nginx-your-site:\n",
+                  "$InputFileStateFile nginx-your-site\n",
+                  "$InputFileSeverity info\n",
+                  "$InputRunFileMonitor\n",
+
+                  "$InputFileName /var/log/nginx/redir-to-http-your-site.log\n",
+                  "$InputFileTag nginx-redir-to-http-your-site:\n",
+                  "$InputFileStateFile nginx-redir-to-http-your-site\n",
+                  "$InputFileSeverity info\n",
+                  "$InputRunFileMonitor\n",
+
+                  "$InputFileName /var/log/nginx/redir-to-www-your-site.log\n",
+                  "$InputFileTag nginx-redir-to-www-your-site:\n",
+                  "$InputFileStateFile nginx-redir-to-www-your-site\n",
+                  "$InputFileSeverity info\n",
+                  "$InputRunFileMonitor\n",
+
+                  "$InputFileName /var/log/cloud-init.log\n",
+                  "$InputFileTag cloud-init:\n",
+                  "$InputFileStateFile cloud-init\n",
+                  "$InputFileSeverity info\n",
+                  "$InputRunFileMonitor\n",
+
+                  "$InputFileName /var/log/cfn-init.log\n",
+                  "$InputFileTag cfn-init:\n",
+                  "$InputFileStateFile cfn-init\n",
+                  "$InputFileSeverity info\n",
+                  "$InputRunFileMonitor\n",
+
+                  "$InputFileName /var/log/auth.log\n",
+                  "$InputFileTag auth:\n",
+                  "$InputFileStateFile state-auth\n",
+                  "$InputFileSeverity info\n",
+                  "$InputRunFileMonitor\n",
+
+                  "$InputFilePollInterval 1\n",
+
+                  "$DefaultNetstreamDriverCAFile /etc/syslog.logentries.crt\n",
+                  "$ActionSendStreamDriver gtls\n",
+                  "$ActionSendStreamDriverMode 1\n",
+                  "$ActionSendStreamDriverAuthMode x509/name\n",
+                  "$ActionSendStreamDriverPermittedPeer *.logentries.com\n",
+
+                  { "Fn::Join" : ["", ["$template LogentriesFormat,\"TODO: Your LogEntries license key here", { "Ref" : "Environment" }, " ", { "Ref" : "WebappVersion" }, " ", " %HOSTNAME% %syslogtag%%msg%\\n\"\n" ]] },
+
+                  "*.* @@api.logentries.com:20000;LogentriesFormat\n",
+                  "\n"
+                ]]},
+                "mode" : "000644",
+                "owner" : "root",
+                "group" : "root"
+              },
+              "/etc/syslog.logentries.crt" : {
+                "source"        : "https://d1l8gt88d35w5z.cloudfront.net/static/1386759272/data/certs/_.logentries.com.crt",
+                "mode"          : "000644",
+                "owner"         : "root",
+                "group"         : "root"
+              },
+              "/tmp/node-v0.10.24-linux-x64.tar.gz" : { 
+                "source"        : "http://nodejs.org/dist/v0.10.24/node-v0.10.24-linux-x64.tar.gz",
+                "mode"          : "000644",
+                "owner"         : "root",
+                "group"         : "root"
+              }
+            }
+          },
+          "application" : {
+            "packages": {
+              "apt" : {
+                "nginx"           : ["1.4.*"] 
+              }             
+            },
+            "sources" : {
+              "/var/your-site" : {"Fn::Join" : ["", ["https://your-site-deployments.s3.amazonaws.com/webapp/webapp-", { "Ref" : "WebappVersion" }, ".tar.gz"]] }
+            },
+            "commands" : {
+              "a-configure-and-start-nginx" : {
+                "command" : "rm -f /etc/nginx/sites-enabled/default >> /var/log/rm.log && ln -s -f /etc/nginx/sites-available/your-site.com /etc/nginx/sites-enabled/your-site.com >> /var/log/ln.log && service nginx restart >> /var/log/restart.log"
+              },
+              "b-start-webapp" : {
+                "command" : "start webapp"
+              }
+            },
+            "files" : {
+              "/etc/init/webapp.conf" : {
+                "content" : { "Fn::Join" : ["", [
+                  "#!upstart\n",
+
+                  "description \"webapp\"\n",
+                  "author      \"Ben Blair\"\n",
+
+                  "start on (local-filesystems and net-device-up IFACE=eth0)\n",
+                  "stop on shutdown\n",
+
+                  "respawn\n",
+                  "# respawn limit 10 60\n",
+
+                  "env PORT=8000\n",
+                  { "Fn::Join" : ["", ["env NODE_ENV=", { "Ref" : "Environment" }, "\n"]] },
+                  "env NODE_STORE=memory\n",
+                  "env AWS_ACCESS_KEY_ID=TODO: Your AWS access key (or use IAM)\n",
+                  "env AWS_SECRET_ACCESS_KEY=TODO: Your AWS secret access key (or use IAM)\n",
+                  { "Fn::Join" : ["", ["env AWS_REGION=", { "Ref" : "AWS::Region" }, "\n"]]},
+                  { "Fn::Join" : ["", ["env AWS_DEFAULT_REGION=", { "Ref" : "AWS::Region" }, "\n"]]},
+
+                  { "Fn::Join" : ["", ["env API_HOSTNAME=", { "Ref" : "ApiServerLoadBalancerDns" }, "\n"] ] },
+                  "env API_PORT=80\n",
+
+                  "export PORT\n",
+                  "export NODE_ENV\n",
+                  "export NODE_STORE\n",
+                  "export AWS_ACCESS_KEY_ID\n",
+                  "export AWS_SECRET_ACCESS_KEY\n",
+                  "export API_HOSTNAME\n",
+                  "export API_PORT\n",
+                  "export AWS_REGION\n",
+                  "export AWS_DEFAULT_REGION\n",
+                  
+                  { "Fn::Join" : ["",  ["chdir /var/your-site/webapp-", { "Ref" : "WebappVersion" }, "\n"]]},
+
+                  "script\n",
+                  { "Fn::Join" : ["",  ["  exec node /var/your-site/webapp-", { "Ref" : "WebappVersion" }, "/server.js >> /var/log/webapp.log 2>&1\n"]]},
+                  "end script\n"
+                ]]},
+                "mode" : "000644",
+                "owner" : "root",
+                "group" : "root"
+              },
+              "/etc/nginx/conf.d/your-site.conf" : {
+                "content" : { "Fn::Join" : ["", [
+                  "log_format detailed_latency '$remote_addr - $remote_user [$time_local] '\n",
+                  "'\"$request\" $http_host $status $bytes_sent ($request_time) '\n",
+                  "'\"$http_referer\" \"$http_user_agent\" \"$gzip_ratio\"';\n",
+
+                  "gzip_proxied any;\n",
+
+                  "gzip_types text/plain text/css application/json application/x-javascript text/xml application/xml application/xml+rss text/javascript;\n"
+                  ]] 
+                }
+              },
+              "/etc/nginx/sites-available/your-site.com" : {
+                "content" : { "Fn::Join" : ["", [
+                  "upstream webapp {\n",
+                    "server 127.0.0.1:8000;\n",
+                  "}\n",
+
+                  "server {\n",
+                    "listen 0.0.0.0:80;\n",
+                    "server_name your-site.com www.your-site.com;\n",
+                    "## redirect http to https ##\n",
+                    "rewrite ^ https://www.your-site.com$request_uri? permanent;\n",
+                    "access_log /var/log/nginx/redir-to-http-your-site.log;\n",
+                  "}\n",
+
+                  "server {\n",
+                    "listen 0.0.0.0:8080;\n",
+                    "server_name your-site.com;\n",
+                    "location /status {\n",
+                      "# pass status checks (from ELB) straight through. Redirects will cause status check to fail.\n",
+                      "# don't set the usual x-forwarded-for and host headers. Elb sets those.\n",
+                      "access_log /var/log/nginx/your-site.log detailed_latency;\n",
+                      "proxy_set_header X-NginX-Proxy true;\n",
+                      "proxy_pass http://webapp;\n",
+                      "proxy_redirect off;\n",
+                    "}\n",
+                    "location / {\n",
+                      "## redirect root domain to www ##\n",
+                      "rewrite ^ https://www.your-site.com$request_uri? permanent;\n",
+                      "access_log /var/log/nginx/redir-to-www-your-site.log detailed_latency;\n",
+                    "}\n",
+                  "}\n",
+
+                  "server {\n",
+                    "listen 0.0.0.0:8080;\n",
+                    "server_name *.your-site.com ~^webapp.+\\.amazonaws\\.com$;\n",
+                    "access_log /var/log/nginx/your-site.log detailed_latency;\n",
+                    "client_max_body_size 10m;\n",
+
+                    "location ~ ^/(images|javascript|js|css|flash|media|static|downloads|styles)/ {\n",
+                      "root /var/your-site/webapp/public;\n",
+                      "try_files $uri @webapp;\n",
+                      "open_file_cache max=1000 inactive=5m;\n",
+                    "}\n",
+
+                    "location / {\n",
+                      "# don't set the usual x-forwarded-for and host headers. Elb sets those.\n",
+                      "proxy_set_header X-NginX-Proxy true;\n",
+                      "proxy_pass http://webapp;\n",
+                      "proxy_redirect off;\n",
+                    "}\n",
+
+                    "location @webapp {\n",
+                      "# don't set the usual x-forwarded-for and host headers. Elb sets those.\n",
+                      "proxy_set_header X-NginX-Proxy true;\n",
+                      "proxy_pass http://webapp;\n",
+                      "proxy_redirect off;\n",
+                    "}\n",
+                  "}\n",
+                  "\n"
+                ]]},
+                "mode" : "000644",
+                "owner" : "root",
+                "group" : "root"
+              }
+            }
+          }
+        },
+        
+        "AWS::CloudFormation::Authentication" : {
+          "S3AccessCreds" : {
+            "type" : "S3",
+            "roleName" : "aws-deployment",
+            "buckets" : [ "your-site-deployments" ]
+          }
+        }
+      },
+      "Properties" : {
+        "ImageId" : { "Fn::FindInMap" : [ "AWSRegionArch2AMI", { "Ref" : "AWS::Region" },
+                                          { "Fn::FindInMap" : [ "AWSInstanceType2Arch", { "Ref" : "InstanceType" },
+                                          "Arch" ] } ] },
+        "KeyName"  : { "Ref" : "KeyName" },
+        "SecurityGroups" : [ { "Ref" : "InstanceSecurityGroup" }, { "Ref" : "InternalSshSecurityGroupId" } ],
+        "InstanceType" : { "Ref" : "InstanceType" },
+        "IamInstanceProfile" : { "Ref" : "DeploymentInstanceProfile" },
+        "UserData" : { "Fn::Base64" : { "Fn::Join" : ["", [
+          "#!/bin/bash\n",
+          "# Add additional apt sources\n",
+          "add-apt-repository -y ppa:nginx/stable\n",
+          "echo deb http://apt.newrelic.com/debian/ newrelic non-free >> /etc/apt/sources.list.d/newrelic.list\n",
+          "wget -O- https://download.newrelic.com/548C16BF.gpg | apt-key add -\n",
+
+          "# Bootstrap Amazon's cfn-init tools\n",
+          "apt-get update\n",
+          "apt-get -y install python-setuptools\n",
+          "wget -P /tmp https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz","\n",
+          "mkdir -p /tmp/aws-cfn-bootstrap-latest","\n",
+          "tar xvfz /tmp/aws-cfn-bootstrap-latest.tar.gz --strip-components=1 -C /tmp/aws-cfn-bootstrap-latest","\n",
+          "easy_install /tmp/aws-cfn-bootstrap-latest/","\n",
+
+          "function error_exit\n",
+          "{\n",
+          "  /usr/local/bin/cfn-signal -e 1 -r \"$1\" '", { "Ref" : "WaitHandle" }, "'\n",
+          "  exit 1\n",
+          "}\n",
+
+          "/usr/local/bin/cfn-init -s ", { "Ref" : "AWS::StackId" }, " -r LaunchConfig -c bootstrap ",
+          "         --region ", { "Ref" : "AWS::Region" }, " || error_exit 'Failed to initialize CloudFormation init scripts'\n",
+
+          "/usr/local/bin/cfn-signal -e $? '", { "Ref" : "WaitHandle" }, "'\n" ]]}
+        }
+      }
+    },
+
+    "WaitHandle" : {
+      "Type" : "AWS::CloudFormation::WaitConditionHandle"
+    },
+
+    "WaitCondition" : {
+      "Type" : "AWS::CloudFormation::WaitCondition",
+      "DependsOn" : "WebappGroup",
+      "Properties" : {
+        "Handle"  : { "Ref" : "WaitHandle" },
+        "Count"   : { "Ref" : "DesiredCapacity" },
+        "Timeout" : "600"
+      }
+    },
+
+    "InstanceSecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Enable HTTP access on the configured port",
+        "VpcId" : { "Ref" : "VpcId" },
+        "SecurityGroupIngress" : [ 
+          { "IpProtocol" : "tcp", "FromPort" : "80", "ToPort" : "80", "SourceSecurityGroupId" : { "Ref" : "PublicLoadBalancerSecurityGroup" } }, 
+          { "IpProtocol" : "tcp", "FromPort" : "8080", "ToPort" : "8080", "SourceSecurityGroupId" : { "Ref" : "PublicLoadBalancerSecurityGroup" } } 
+        ]
+      }
+    }
+  },
+
+  "Outputs" : {
+    "AutoScalingGroup" : {
+      "Description": "webapp's auto scaling group",
+      "Value": { "Ref" : "WebappGroup" }
+    }
+  }
+}
